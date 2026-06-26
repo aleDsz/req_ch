@@ -152,9 +152,18 @@ defmodule ReqCH do
   defp run(%Req.Request{} = request) do
     request = update_in(request.options, &Map.put_new(&1, :base_url, "http://localhost:8123"))
 
-    with %Req.Request{} = req1 <- add_format(request),
-         %Req.Request{} = req2 <- maybe_add_database(req1) do
-      Req.Request.append_response_steps(req2, clickhouse_result: &handle_clickhouse_result/1)
+    request
+    |> add_format()
+    |> maybe_remove_compression()
+    |> maybe_add_database()
+    |> Req.Request.append_response_steps(clickhouse_result: &handle_clickhouse_result/1)
+  end
+
+  defp maybe_remove_compression(request) do
+    if Req.Request.get_private(request, :clickhouse_format) == :adbc do
+      put_params(request, output_format_arrow_compression_method: "none")
+    else
+      request
     end
   end
 
@@ -231,41 +240,31 @@ defmodule ReqCH do
     [key, ?:, value]
   end
 
-  @valid_formats [:tsv, :csv, :json, :explorer]
+  @valid_formats [:tsv, :csv, :json, :adbc]
 
   defp add_format(%Req.Request{} = request) do
-    format_option = Req.Request.get_option(request, :format, :tsv)
-    format = normalise_format(format_option)
+    format = Req.Request.get_option(request, :format, :tsv)
+    :ok = ensure_format!(format)
 
-    if format do
-      format_header = with :explorer <- format, do: "Parquet"
-
-      request
-      |> Req.Request.put_private(:clickhouse_format, format)
-      |> Req.Request.put_header("x-clickhouse-format", format_header)
-    else
-      raise ArgumentError,
-            "the given format #{inspect(format_option)} is invalid. Expecting one of #{inspect(@valid_formats)} " <>
-              "or one of the valid options described in #{@formats_page}"
-    end
+    request
+    |> Req.Request.put_private(:clickhouse_format, format)
+    |> Req.Request.put_header("x-clickhouse-format", format_to_string(format))
   end
 
-  defp normalise_format(:tsv), do: "TabSeparated"
-  defp normalise_format(:csv), do: "CSV"
-  defp normalise_format(:json), do: "JSON"
+  defp ensure_format!(format) when format in @supported_formats, do: :ok
+  defp ensure_format!(format) when format in @valid_formats, do: :ok
 
-  if Code.ensure_loaded?(Explorer) do
-    defp normalise_format(:explorer), do: :explorer
-  else
-    defp normalise_format(:explorer) do
-      raise ArgumentError,
-            "format: :explorer - you need to install Explorer as a dependency in order to use this format"
-    end
+  defp ensure_format!(format) do
+    raise ArgumentError,
+          "the given format #{inspect(format)} is invalid. Expecting one of #{inspect(@valid_formats)} " <>
+            "or one of the valid options described in #{@formats_page}"
   end
 
-  defp normalise_format(format) when format in @supported_formats, do: format
-
-  defp normalise_format(_), do: nil
+  defp format_to_string(:tsv), do: "TabSeparated"
+  defp format_to_string(:csv), do: "CSV"
+  defp format_to_string(:json), do: "JSON"
+  defp format_to_string(:adbc), do: "ArrowStream"
+  defp format_to_string(format) when format in @supported_formats, do: format
 
   defp maybe_add_database(%Req.Request{} = request) do
     if database = Req.Request.get_option(request, :database) do
@@ -276,11 +275,11 @@ defmodule ReqCH do
   end
 
   defp handle_clickhouse_result({request, %{status: 200} = response} = pair) do
-    want_explorer_df = Req.Request.get_private(request, :clickhouse_format) == :explorer
-    is_parquet_response = response.headers["x-clickhouse-format"] == ["Parquet"]
+    format = Req.Request.get_private(request, :clickhouse_format)
+    format_header = Req.Response.get_header(response, "x-clickhouse-format")
 
-    if want_explorer_df and is_parquet_response do
-      Req.Request.halt(request, update_in(response.body, &load_parquet/1))
+    if format == :adbc and format_header == ["ArrowStream"] do
+      Req.Request.halt(request, update_in(response.body, &load_arrow/1))
     else
       pair
     end
@@ -288,14 +287,14 @@ defmodule ReqCH do
 
   defp handle_clickhouse_result(request_response), do: request_response
 
-  if Code.ensure_loaded?(Explorer) do
-    defp load_parquet(body) do
-      Explorer.DataFrame.load_parquet!(body)
+  if Code.ensure_loaded?(Adbc) do
+    defp load_arrow(body) do
+      Adbc.Result.from_ipc_stream!(body)
     end
   else
-    defp load_parquet(_body) do
+    defp load_arrow(_body) do
       raise ArgumentError,
-            "format: :explorer - you need to install Explorer as a dependency in order to use this format"
+            "format: :adbc - you need to install Adbc as a dependency in order to use this format"
     end
   end
 end
