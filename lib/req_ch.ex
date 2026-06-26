@@ -26,13 +26,13 @@ defmodule ReqCH do
   It is by default "http://localhost:8123".
 
     * `:format` - Optional. The format of the response. Default is `:tsv`.
-      This option accepts `:tsv`, `:csv`, `:json` or `:explorer` as atoms.
+      This option accepts `:tsv`, `:csv`, `:json` or `:adbc` as atoms.
 
       It also accepts all formats described in the #{@formats_page} page.
       Use plain strings for these formats.
 
-      The `:explorer` format is special, and will build an Explorer dataframe
-      in case the `:explorer` dependency is installed.
+      The `:adbc` format is special, and will build an Result struct
+      in case the `:adbc` dependency is installed.
 
     * `:database` - Optional. The database to use in the queries.
       Default is `nil`.
@@ -91,12 +91,24 @@ defmodule ReqCH do
   With a specific format:
 
       iex> req = ReqCH.new(database: "system")
-      iex> {:ok, response} = ReqCH.query(req, "SELECT number FROM numbers LIMIT 3", [], [format: :explorer])
+      iex> {:ok, response} = ReqCH.query(req, "SELECT number FROM numbers LIMIT 3", [], [format: :adbc])
       iex> response.body
-      #Explorer.DataFrame<
-        Polars[3 x 1]
-        number u64 [0, 1, 2]
-      >
+      %Adbc.Result{
+         data: [
+          [
+            %Adbc.Column{
+              field: %Adbc.Field{name: "number", type: :u64, metadata: nil},
+              data: %Adbc.BufferData{
+                data: <<0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0>>,
+                validity: nil,
+                bit_offset: 0
+              },
+              size: nil
+            }
+          ]
+         ],
+         num_rows: nil
+       }
 
    Passing SQL params:
 
