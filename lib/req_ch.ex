@@ -26,13 +26,13 @@ defmodule ReqCH do
   It is by default "http://localhost:8123".
 
     * `:format` - Optional. The format of the response. Default is `:tsv`.
-      This option accepts `:tsv`, `:csv`, `:json` or `:adbc` as atoms.
+      This option accepts `:tsv`, `:csv`, `:json`, `:explorer` and `:adbc` as atoms.
 
       It also accepts all formats described in the #{@formats_page} page.
       Use plain strings for these formats.
 
-      The `:adbc` format is special, and will build an Result struct
-      in case the `:adbc` dependency is installed.
+      The `:adbc` and `:explorer` formats are special, and will build an Result struct
+      in case the required dependency is installed.
 
     * `:database` - Optional. The database to use in the queries.
       Default is `nil`.
@@ -88,7 +88,7 @@ defmodule ReqCH do
       iex> response.body
       "0\\n1\\n2\\n"
 
-  With a specific format:
+  With the `:adbc` format:
 
       iex> req = ReqCH.new(database: "system")
       iex> {:ok, response} = ReqCH.query(req, "SELECT number FROM numbers LIMIT 3", [], [format: :adbc])
@@ -109,6 +109,16 @@ defmodule ReqCH do
          ],
          num_rows: nil
        }
+
+  With the `:explorer` format:
+
+      iex> req = ReqCH.new(database: "system")
+      iex> {:ok, response} = ReqCH.query(req, "SELECT number FROM numbers LIMIT 3", [], [format: :explorer])
+      iex> response.body
+      #Explorer.DataFrame<
+        Polars[3 x 1]
+        number u64 [0, 1, 2]
+      >
 
    Passing SQL params:
 
@@ -252,7 +262,7 @@ defmodule ReqCH do
     [key, ?:, value]
   end
 
-  @valid_formats [:tsv, :csv, :json, :adbc]
+  @valid_formats [:tsv, :csv, :json, :explorer, :adbc]
 
   defp add_format(%Req.Request{} = request) do
     format = Req.Request.get_option(request, :format, :tsv)
@@ -276,6 +286,7 @@ defmodule ReqCH do
   defp format_to_string(:csv), do: "CSV"
   defp format_to_string(:json), do: "JSON"
   defp format_to_string(:adbc), do: "ArrowStream"
+  defp format_to_string(:explorer), do: "Parquet"
   defp format_to_string(format) when format in @supported_formats, do: format
 
   defp maybe_add_database(%Req.Request{} = request) do
@@ -290,10 +301,15 @@ defmodule ReqCH do
     format = Req.Request.get_private(request, :clickhouse_format)
     format_header = Req.Response.get_header(response, "x-clickhouse-format")
 
-    if format == :adbc and format_header == ["ArrowStream"] do
-      Req.Request.halt(request, update_in(response.body, &load_arrow/1))
-    else
-      pair
+    case {format, format_header} do
+      {:adbc, ["ArrowStream"]} ->
+        Req.Request.halt(request, update_in(response.body, &load_arrow/1))
+
+      {:explorer, ["Parquet"]} ->
+        Req.Request.halt(request, update_in(response.body, &load_parquet/1))
+
+      _otherwise ->
+        pair
     end
   end
 
@@ -307,6 +323,17 @@ defmodule ReqCH do
     defp load_arrow(_body) do
       raise ArgumentError,
             "format: :adbc - you need to install Adbc as a dependency in order to use this format"
+    end
+  end
+
+  if Code.ensure_loaded?(Explorer) do
+    defp load_parquet(body) do
+      Explorer.DataFrame.load_parquet!(body)
+    end
+  else
+    defp load_parquet(_body) do
+      raise ArgumentError,
+            "format: :explorer - you need to install Explorer as a dependency in order to use this format"
     end
   end
 end
